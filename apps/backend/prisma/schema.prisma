@@ -1,0 +1,116 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users        User[]
+  liveSessions LiveSession[]
+
+  @@map("organizations")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  email     String
+  password  String
+  name      String
+  role      UserRole @default(STAFF_WHITE)
+  avatar    String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org            Organization        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  hostedSessions LiveSession[]       @relation("SessionCoach")
+  attendance     SessionAttendance[]
+  chatMessages   SessionChat[]
+
+  @@unique([orgId, email])
+  @@index([orgId])
+  @@map("users")
+}
+
+enum UserRole {
+  ORG_ADMIN
+  MANAGER
+  COURSE_DESIGNER
+  COACH
+  STAFF_WHITE
+  STAFF_BLUE
+}
+
+model LiveSession {
+  id              String        @id @default(uuid())
+  orgId           String        @map("org_id")
+  courseId        String?       @map("course_id")
+  coachId         String        @map("coach_id")
+  title           String
+  description     String?
+  scheduledAt     DateTime?     @map("scheduled_at")
+  startedAt       DateTime?     @map("started_at")
+  endedAt         DateTime?     @map("ended_at")
+  recordingUrl    String?       @map("recording_url")
+  status          SessionStatus @default(SCHEDULED)
+  maxParticipants Int           @default(50) @map("max_participants")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  org          Organization        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  coach        User                @relation("SessionCoach", fields: [coachId], references: [id])
+  attendance   SessionAttendance[]
+  chatMessages SessionChat[]
+
+  @@index([orgId])
+  @@index([orgId, status])
+  @@map("live_sessions")
+}
+
+enum SessionStatus {
+  SCHEDULED
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+model SessionAttendance {
+  id              String    @id @default(uuid())
+  orgId           String    @map("org_id")
+  sessionId       String    @map("session_id")
+  userId          String    @map("user_id")
+  joinedAt        DateTime  @map("joined_at")
+  leftAt          DateTime? @map("left_at")
+  durationSeconds Int?      @map("duration_seconds")
+
+  session LiveSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([orgId, sessionId])
+  @@map("session_attendance")
+}
+
+model SessionChat {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  sessionId String   @map("session_id")
+  userId    String   @map("user_id")
+  message   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session LiveSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("session_chat")
+}
