@@ -1,24 +1,22 @@
 import * as mediasoup from 'mediasoup';
-import type { Worker, RtpCodecCapability } from 'mediasoup/node/lib/types';
+import type { Worker, RouterRtpCodecCapability } from 'mediasoup/node/lib/types';
 import os from 'os';
 import { logger } from '../utils/logger';
 import { WorkerEntry } from '../types/mediasoup.types';
 
 // ── Codec list passed to every Router ────────────────────────────────────────
-export const mediaCodecs: RtpCodecCapability[] = [
+export const mediaCodecs: RouterRtpCodecCapability[] = [
   {
       kind: 'audio',
       mimeType: 'audio/opus',
       clockRate: 48000,
       channels: 2,
-      preferredPayloadType: 0
   },
   {
       kind: 'video',
       mimeType: 'video/VP8',
       clockRate: 90000,
       parameters: { 'x-google-start-bitrate': 1000 },
-      preferredPayloadType: 0
   },
   {
       kind: 'video',
@@ -27,8 +25,7 @@ export const mediaCodecs: RtpCodecCapability[] = [
       parameters: {
           'profile-id': 2,
           'x-google-start-bitrate': 1000,
-      },
-      preferredPayloadType: 0
+      }
   },
   {
       kind: 'video',
@@ -39,8 +36,7 @@ export const mediaCodecs: RtpCodecCapability[] = [
           'profile-level-id': '4d0032',
           'level-asymmetry-allowed': 1,
           'x-google-start-bitrate': 1000,
-      },
-      preferredPayloadType: 0
+      }
   },
 ];
 

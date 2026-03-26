@@ -16,6 +16,9 @@ import routes from './routes';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter } from './middleware/rateLimiter';
 import { logger } from './utils/logger';
+import { setupSwagger } from './config/swagger';
+import fs from 'fs';
+import path from 'path';
 
 // ── Express app ───────────────────────────────────────────────────────────────
 const app = express();
@@ -52,11 +55,27 @@ app.use('/api', apiLimiter);
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({
-    status:    'ok',
+    status:    'ok from backend',
     timestamp: new Date().toISOString(),
     env:       process.env.NODE_ENV,
   });
 });
+
+// ── AsyncAPI spec (serve YAML) ─────────────────────────────────────────────────
+app.get('/queue', (_req, res) => {
+  try {
+    const file = path.resolve(__dirname, '../../../asyncapi.yaml');
+    const yaml = fs.readFileSync(file, 'utf8');
+    // Serve as inline plain text so browsers render instead of downloading
+    res.setHeader('Content-Disposition', 'inline; filename="asyncapi.yaml"');
+    res.type('text/plain').send(yaml);
+  } catch (err) {
+    res.status(500).json({ error: 'AsyncAPI spec not found' });
+  }
+});
+
+// Swagger docs (serve at root) — register after /queue so it doesn't override
+setupSwagger(app);
 
 // ── API routes ────────────────────────────────────────────────────────────────
 app.use('/api/v1', routes);

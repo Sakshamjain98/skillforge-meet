@@ -28,16 +28,26 @@ export async function createSession(input: CreateSessionInput) {
 }
 
 export async function getSessionsByOrg(orgId: string) {
+  // Return sessions that belong to the org plus any sessions that are currently LIVE.
+  // This allows users to discover and join live sessions across organizations.
   return prisma.liveSession.findMany({
-    where:   { orgId },
+    where: {
+      OR: [
+        { orgId },
+        { status: 'LIVE' },
+      ],
+    },
     include: { coach: { select: { name: true, avatar: true } } },
     orderBy: { createdAt: 'desc' },
   });
 }
 
-export async function getSessionById(id: string, orgId: string) {
+export async function getSessionById(id: string, orgId?: string) {
+  const whereClause: any = { id };
+  if (orgId) whereClause.orgId = orgId;
+
   return prisma.liveSession.findFirst({
-    where:   { id, orgId },
+    where:   whereClause,
     include: {
       coach:      { select: { id: true, name: true, avatar: true } },
       attendance: {

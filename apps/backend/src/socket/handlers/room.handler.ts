@@ -20,12 +20,22 @@ export function registerRoomHandlers(io: Server, socket: Socket): void {
       try {
         const { userId, orgId, name, role } = socket.data;
 
-        // 1. Authorise — session must belong to this org
-        const session = await prisma.liveSession.findFirst({
-          where: { id: roomId, orgId },
-        });
+        // 1. Authorise — allow authenticated users to join by session id.
+        // Previously we restricted joins to users in the same org (orgId).
+        // To permit cross-organization joins, look up the session by id only.
+        const session = await prisma.liveSession.findUnique({ where: { id: roomId } });
         if (!session) {
-          return callback({ error: 'Session not found or access denied' } as any);
+          return callback({ error: 'Session not found' } as any);
+        }
+
+        // Log if the joining user is from a different org than the session owner.
+        if (session.orgId !== orgId) {
+          logger.info('Cross-org join: user from different org joining session', {
+            roomId,
+            sessionOrgId: session.orgId,
+            userOrgId: orgId,
+            userId,
+          });
         }
 
         // 2. Get or create mediasoup Room / Router

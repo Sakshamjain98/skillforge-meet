@@ -1,0 +1,99 @@
+asyncapi: '2.6.0'
+info:
+  title: SkillForge Meet Messaging API
+  version: '1.0.0'
+  description: |
+    AsyncAPI documentation for SkillForge Meet's RabbitMQ-based events and queues.
+servers:
+  rabbitmq:
+    url: amqp://localhost:5672
+    protocol: amqp
+channels:
+  session.events:
+    description: Topic exchange for session-related events
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: skillforge.session.events
+          type: topic
+    subscribe:
+      operationId: onSessionEvent
+      summary: Receive all session events
+      bindings:
+        amqp:
+          queue:
+            name: skillforge.session.events.queue
+            durable: true
+      message:
+        oneOf:
+          - $ref: '#/components/messages/ParticipantJoined'
+          - $ref: '#/components/messages/ParticipantLeft'
+          - $ref: '#/components/messages/SessionStarted'
+          - $ref: '#/components/messages/SessionEnded'
+          - $ref: '#/components/messages/RecordingReady'
+components:
+  messages:
+    ParticipantJoined:
+      name: ParticipantJoined
+      payload:
+        type: object
+        properties:
+          sessionId:
+            type: string
+          userId:
+            type: string
+          orgId:
+            type: string
+          joinedAt:
+            type: string
+            format: date-time
+    ParticipantLeft:
+      name: ParticipantLeft
+      payload:
+        type: object
+        properties:
+          sessionId:
+            type: string
+          userId:
+            type: string
+          orgId:
+            type: string
+          leftAt:
+            type: string
+            format: date-time
+    SessionStarted:
+      name: SessionStarted
+      payload:
+        type: object
+        properties:
+          sessionId:
+            type: string
+          orgId:
+            type: string
+          startedAt:
+            type: string
+            format: date-time
+    SessionEnded:
+      name: SessionEnded
+      payload:
+        type: object
+        properties:
+          sessionId:
+            type: string
+          orgId:
+            type: string
+          endedAt:
+            type: string
+            format: date-time
+    RecordingReady:
+      name: RecordingReady
+      payload:
+        type: object
+        properties:
+          sessionId:
+            type: string
+          orgId:
+            type: string
+          recordingUrl:
+            type: string

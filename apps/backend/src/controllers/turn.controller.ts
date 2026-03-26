@@ -13,3 +13,17 @@ export function getTurnCredentials(
     next(err);
   }
 }
+
+/**
+ * @openapi
+ * /turn/credentials:
+ *   get:
+ *     summary: Get TURN credentials for the current user
+ *     tags:
+ *       - TURN
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: TURN credentials
+ */

@@ -39,6 +39,35 @@ export async function register(
   }
 }
 
+/**
+ * @openapi
+ * /auth/register:
+ *   post:
+ *     summary: Register a new organization and admin user
+ *     tags:
+ *       - Auth
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [orgName, name, email, password]
+ *             properties:
+ *               orgName:
+ *                 type: string
+ *               name:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               password:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Created
+ */
+
 export async function login(
   req: Request,
   res: Response,
@@ -52,6 +81,33 @@ export async function login(
     next(err);
   }
 }
+
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     summary: Login and receive access and refresh tokens
+ *     tags:
+ *       - Auth
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [orgId, email, password]
+ *             properties:
+ *               orgId:
+ *                 type: string
+ *                 format: uuid
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: OK
+ */
 
 export async function refreshToken(
   req: Request,
@@ -84,6 +140,27 @@ export async function refreshToken(
   }
 }
 
+/**
+ * @openapi
+ * /auth/refresh:
+ *   post:
+ *     summary: Refresh access token using a refresh token
+ *     tags:
+ *       - Auth
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               token:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: New access token
+ */
+
 export async function getMe(
   req: Request,
   res: Response,
@@ -111,3 +188,17 @@ export async function getMe(
     next(err);
   }
 }
+
+/**
+ * @openapi
+ * /auth/me:
+ *   get:
+ *     summary: Get current authenticated user
+ *     tags:
+ *       - Auth
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Current user
+ */
