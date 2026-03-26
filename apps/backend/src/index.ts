@@ -62,10 +62,10 @@ app.get('/health', (_req, res) => {
 });
 
 // ── AsyncAPI spec (serve YAML) ─────────────────────────────────────────────────
-app.get('/queue', (_req, res) => {
+app.get('/queue', async (_req, res) => {
   try {
     const file = path.resolve(__dirname, '../../../asyncapi.yaml');
-    const yaml = fs.readFileSync(file, 'utf8');
+    const yaml = await fs.promises.readFile(file, 'utf8');
     // Serve as inline plain text so browsers render instead of downloading
     res.setHeader('Content-Disposition', 'inline; filename="asyncapi.yaml"');
     res.type('text/plain').send(yaml);
@@ -88,6 +88,24 @@ const httpServer = http.createServer(app);
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 async function bootstrap(): Promise<void> {
+  // Validate that required environment variables are present to avoid
+  // surprising runtime errors or unsafe defaults.
+  function validateEnv(): void {
+    const required = [
+      'JWT_SECRET',
+      'JWT_REFRESH_SECRET',
+      'TURN_SECRET',
+      'CLOUDINARY_CLOUD_NAME',
+      'CLOUDINARY_API_KEY',
+      'CLOUDINARY_API_SECRET',
+    ];
+    const missing = required.filter((k) => !process.env[k]);
+    if (missing.length) {
+      logger.error('Missing required environment variables', { missing });
+      throw new Error('Missing required environment variables: ' + missing.join(', '));
+    }
+  }
+  validateEnv();
   try {
     // 1. PostgreSQL
     await connectDatabase();

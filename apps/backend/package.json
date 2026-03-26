@@ -7,10 +7,14 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "worker:attendance": "ts-node src/workers/attendance.worker.ts",
+    "worker:recording": "ts-node src/workers/recording.worker.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "test:unit": "ts-node test/room.manager.test.ts",
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
@@ -52,5 +56,9 @@
     "prisma": "^5.22.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.3"
+  ,
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "@types/jest": "^29.0.0"
   }
 }

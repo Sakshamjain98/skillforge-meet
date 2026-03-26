@@ -88,6 +88,11 @@ export function getLeastLoadedWorker(): Worker {
   return [...workers].sort((a, b) => a.load - b.load)[0].worker;
 }
 
+export function getWorkerByPid(pid: number): Worker | null {
+  const entry = workers.find((w) => w.worker.pid === pid);
+  return entry ? entry.worker : null;
+}
+
 export function incrementWorkerLoad(pid: number): void {
   const entry = workers.find((w) => w.worker.pid === pid);
   if (entry) entry.load++;

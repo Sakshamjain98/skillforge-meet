@@ -1,12 +1,14 @@
-import { spawn, spawnSync, ChildProcess } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import dgram from 'dgram';
 import { roomManager } from '../socket/room.manager';
 import fs from 'fs';
+const fsp = fs.promises;
 import path from 'path';
 import { cloudinary } from '../config/cloudinary';
 import { updateRecordingUrl } from './session.service';
 import { logger } from '../utils/logger';
 import { getIo } from '../socket';
+import { getChannel, QUEUES } from '../config/rabbitmq';
 
 interface RecordingSession {
   process:    ChildProcess;
@@ -77,11 +79,11 @@ export async function startRecording(
     videoPort = await getFreeUdpPort();
   }
   const outputDir = path.join(process.cwd(), 'tmp', 'recordings', sessionId);
-  fs.mkdirSync(outputDir, { recursive: true });
+  await fsp.mkdir(outputDir, { recursive: true });
 
   const sdpContent = buildSdp(audioPort, videoPort, audioPayloadType, videoPayloadType);
   const sdpPath    = path.join(outputDir, 'input.sdp');
-  fs.writeFileSync(sdpPath, sdpContent);
+  await fsp.writeFile(sdpPath, sdpContent);
 
   const m3u8Path = path.join(outputDir, 'index.m3u8');
 
@@ -111,11 +113,16 @@ export async function startRecording(
 
   // Ensure ffmpeg is available before attempting to spawn it (clear ENOENT symptom)
   try {
-    const v = spawnSync('ffmpeg', ['-version']);
-    if (v.error || v.status !== 0) {
-      logger.error('FFmpeg check failed', { error: String(v.error) });
-      throw new Error('FFmpeg not found in PATH or not executable. Install ffmpeg and ensure it is on the system PATH.');
-    }
+    await (async function checkFfmpeg(): Promise<void> {
+      return new Promise((resolve, reject) => {
+        const p = spawn('ffmpeg', ['-version']);
+        p.on('error', (err) => reject(err));
+        p.on('exit', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('ffmpeg returned non-zero exit code: ' + code));
+        });
+      });
+    })();
   } catch (err) {
     logger.error('FFmpeg availability check threw', { error: String(err) });
     try { getIo()?.to(sessionId).emit('recording:start:failed', { sessionId, error: String(err) }); } catch {}
@@ -245,24 +252,25 @@ export async function stopRecording(
     while (Date.now() - start < timeoutMs) {
       try {
         // Prefer the final playlist
-        if (fs.existsSync(pathToCheck)) {
-          const st = fs.statSync(pathToCheck);
+        try {
+          const st = await fsp.stat(pathToCheck);
           if (st.size && st.size > 0) return true;
-        }
+        } catch {}
+
         // If a .tmp playlist exists and is non-empty, rename it to the final
         // playlist unconditionally (resolving race conditions where FFmpeg
         // writes a .tmp file then renames it).
-        if (fs.existsSync(tmpPath)) {
-          const st = fs.statSync(tmpPath);
-          if (st.size && st.size > 0) {
+        try {
+          const stTmp = await fsp.stat(tmpPath);
+          if (stTmp.size && stTmp.size > 0) {
             try {
-              fs.renameSync(tmpPath, pathToCheck);
+              await fsp.rename(tmpPath, pathToCheck);
               return true;
             } catch (e) {
               logger.debug('Failed to rename tmp playlist to final, will retry', { error: String(e) });
             }
           }
-        }
+        } catch {}
       } catch (e) {
         logger.debug('Error while waiting for playlist', { error: String(e) });
       }
@@ -280,16 +288,31 @@ export async function stopRecording(
 
   activeRecordings.delete(sessionId);
 
-  // Upload HLS playlist to Cloudinary
+  // Enqueue recording upload job to background worker to avoid blocking
+  try {
+    const ch = getChannel();
+    const payload = { sessionId, orgId, outputDir: rec.outputDir, m3u8Path: rec.m3u8Path };
+    ch.sendToQueue(QUEUES.RECORDING, Buffer.from(JSON.stringify(payload)), { persistent: true });
+    try { getIo()?.to(sessionId).emit('recording:upload:queued', { sessionId }); } catch {}
+    logger.info('Enqueued recording upload job', { sessionId, outputDir: rec.outputDir });
+    return null;
+  } catch (err) {
+    logger.error('Failed to enqueue recording job', { error: String(err) });
+    // Fall through to attempt inline upload as a best-effort fallback
+  }
+
+  // Upload HLS playlist to Cloudinary (fallback if enqueue failed)
   try {
     // Ensure the playlist exists and appears non-empty
-    if (!fs.existsSync(rec.m3u8Path)) {
+    try {
+      await fsp.access(rec.m3u8Path);
+    } catch {
       // Log directory contents to help debugging
       try {
-        const files = fs.readdirSync(rec.outputDir);
-        const details = files.map((f) => {
-          try { const s = fs.statSync(path.join(rec.outputDir, f)); return { f, size: s.size }; } catch { return { f, size: null }; }
-        });
+        const files = await fsp.readdir(rec.outputDir);
+        const details = await Promise.all(files.map(async (f) => {
+          try { const s = await fsp.stat(path.join(rec.outputDir, f)); return { f, size: s.size }; } catch { return { f, size: null }; }
+        }));
         logger.debug('Recording directory contents before upload', { outputDir: rec.outputDir, files: details });
       } catch (e) {
         logger.debug('Failed to list recording directory before upload', { error: String(e) });
@@ -299,7 +322,7 @@ export async function stopRecording(
       try { getIo()?.to(sessionId).emit('recording:upload:failed', { sessionId, error: msg }); } catch {}
       throw new Error(msg);
     }
-    const stat = fs.statSync(rec.m3u8Path);
+    const stat = await fsp.stat(rec.m3u8Path);
     if (stat.size === 0) {
       logger.debug('Recording playlist exists but is empty', { path: rec.m3u8Path, size: stat.size });
       const msg = `HLS playlist is empty at ${rec.m3u8Path}`;
@@ -327,7 +350,7 @@ export async function stopRecording(
       await updateRecordingUrl(sessionId, url);
       logger.info(`Recording uploaded for session ${sessionId}`, { url });
       try { getIo()?.to(sessionId).emit('recording:upload:done', { sessionId, url }); } catch {}
-      fs.rmSync(rec.outputDir, { recursive: true, force: true });
+      try { await fsp.rm(rec.outputDir, { recursive: true, force: true }); } catch {}
       return url;
     } catch (uploadErr) {
       // If playlist upload failed (invalid file / auth), attempt MP4 fallback
@@ -336,34 +359,45 @@ export async function stopRecording(
       logger.warn('HLS upload failed, attempting MP4 transcode fallback', { error: uploadErrMsg });
       try { getIo()?.to(sessionId).emit('recording:upload:warning', { sessionId, warning: 'HLS upload failed, trying MP4 fallback' }); } catch {}
 
-      // Transcode to MP4 using ffmpeg
-      const mp4Path = path.join(rec.outputDir, 'output.mp4');
-      try {
-        logger.info('Transcoding HLS to MP4 as fallback', { sessionId, mp4Path });
-        const ff = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', rec.m3u8Path, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', mp4Path], { timeout: 0 });
-        if (ff.error) throw ff.error;
-        if (ff.status !== 0) {
-          throw new Error(`ffmpeg failed with status ${ff.status}: ${ff.stderr?.toString()}`);
-        }
-        if (!fs.existsSync(mp4Path) || fs.statSync(mp4Path).size === 0) {
-          throw new Error('Transcoded MP4 not found or empty');
-        }
+        // Transcode to MP4 using ffmpeg (non-blocking)
+        const mp4Path = path.join(rec.outputDir, 'output.mp4');
+        try {
+          logger.info('Transcoding HLS to MP4 as fallback', { sessionId, mp4Path });
+          await (async function transcodeHlsToMp4(): Promise<void> {
+            return new Promise((resolve, reject) => {
+              const p = spawn('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', rec.m3u8Path, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', mp4Path]);
+              let stderr = '';
+              p.on('error', (err) => reject(err));
+              p.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+              p.on('exit', (code) => {
+                if (code === 0) resolve();
+                else reject(new Error(`ffmpeg failed with status ${code}: ${stderr}`));
+              });
+            });
+          })();
 
-        // Upload MP4 to Cloudinary
-        const mp4Result = await cloudinary.uploader.upload(mp4Path, {
-          resource_type: 'video',
-          public_id:     `skillforge/recordings/${orgId}/${sessionId}/index_mp4`,
-          overwrite:     true,
-        });
+          try {
+            const st = await fsp.stat(mp4Path);
+            if (!st || st.size === 0) throw new Error('Transcoded MP4 not found or empty');
+          } catch (e) {
+            throw e;
+          }
 
-        const url = mp4Result.secure_url;
-        await updateRecordingUrl(sessionId, url);
-        logger.info(`MP4 fallback uploaded for session ${sessionId}`, { url });
-        try { getIo()?.to(sessionId).emit('recording:upload:done', { sessionId, url }); } catch {}
-        // Clean up temp files
-        try { fs.rmSync(rec.outputDir, { recursive: true, force: true }); } catch {}
-        return url;
-      } catch (fallbackErr) {
+          // Upload MP4 to Cloudinary
+          const mp4Result = await cloudinary.uploader.upload(mp4Path, {
+            resource_type: 'video',
+            public_id:     `skillforge/recordings/${orgId}/${sessionId}/index_mp4`,
+            overwrite:     true,
+          });
+
+          const url = mp4Result.secure_url;
+          await updateRecordingUrl(sessionId, url);
+          logger.info(`MP4 fallback uploaded for session ${sessionId}`, { url });
+          try { getIo()?.to(sessionId).emit('recording:upload:done', { sessionId, url }); } catch {}
+          // Clean up temp files
+          try { await fsp.rm(rec.outputDir, { recursive: true, force: true }); } catch {}
+          return url;
+        } catch (fallbackErr) {
         let fallbackMsg = 'Unknown fallback error';
         if (fallbackErr instanceof Error) fallbackMsg = fallbackErr.message;
         else {

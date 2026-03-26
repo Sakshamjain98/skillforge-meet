@@ -58,7 +58,7 @@ services:
       --external-ip=127.0.0.1
       --realm=skillforge.local
       --use-auth-secret
-      --static-auth-secret=change_me_to_random_32_char_turn_secret
+      --static-auth-secret=${TURN_SECRET}
       --no-tcp-relay
       --fingerprint
       --lt-cred-mech

@@ -3,7 +3,12 @@ import path from 'path';
 import fs from 'fs';
 
 const logsDir = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+// Create logs directory asynchronously to avoid blocking the event loop.
+fs.promises
+  .mkdir(logsDir, { recursive: true })
+  .catch(() => {
+    // If directory creation fails, ignore — winston will attempt to create files.
+  });
 
 const { combine, timestamp, colorize, printf, json } = winston.format;
 

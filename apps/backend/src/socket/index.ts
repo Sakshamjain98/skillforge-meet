@@ -36,10 +36,14 @@ export function createSocketServer(httpServer: HttpServer): Server {
   // instances, not just the one that received the socket connection.
   io.adapter(createAdapter(redisPub, redisSub));
 
-  // ── Optional Admin UI for Socket.IO (disabled auth in dev)
+  // ── Optional Admin UI for Socket.IO (DEV only; disabled in production)
   try {
-    instrument(io, { auth: false });
-    logger.info('Socket.IO admin-ui instrumented');
+    if (process.env.SOCKET_ADMIN_ENABLED === 'true' && process.env.NODE_ENV !== 'production') {
+      instrument(io, { auth: false });
+      logger.info('Socket.IO admin-ui instrumented (dev only)');
+    } else {
+      logger.info('Socket.IO admin-ui not enabled');
+    }
   } catch (err) {
     logger.warn('Socket.IO admin-ui instrument failed', { error: String(err) });
   }

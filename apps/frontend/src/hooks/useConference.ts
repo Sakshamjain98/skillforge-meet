@@ -316,10 +316,24 @@ export function useConference(roomId: string) {
       }
     }
 
-    // 9. Consume existing streams
-    for (const { producerId, userId, kind } of joinData.existingProducers) {
-      await consumeProducer(producerId, userId, kind);
-    }
+    // 9. Consume existing streams (parallel with concurrency limit)
+    const producers = joinData.existingProducers;
+    const concurrency = 6;
+    let idx = 0;
+    const workers: Promise<void>[] = new Array(concurrency).fill(0).map(async () => {
+      while (idx < producers.length) {
+        const i = idx++; // take next
+        const { producerId, userId, kind } = producers[i];
+        try {
+          // fire each consume but don't block other workers
+          // eslint-disable-next-line no-await-in-loop
+          await consumeProducer(producerId, userId, kind);
+        } catch (err) {
+          console.error('[consume] failed (parallel)', { producerId, userId, kind, err });
+        }
+      }
+    });
+    await Promise.all(workers);
 
     // 10. Pre-load chat history
     const chatData = await emitWithPromise<{ messages: any[] }>(

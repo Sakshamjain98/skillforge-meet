@@ -10,18 +10,55 @@ import {
   mediaCodecs,
   incrementWorkerLoad,
   decrementWorkerLoad,
+  getWorkerByPid,
 } from '../config/mediasoup';
+import broker from './worker.broker';
 import { logger } from '../utils/logger';
 import type { PeerState, RoomState, ProducerInfo, TransportDirection } from '../types/mediasoup.types';
 
-class RoomManager {
+export class RoomManager {
   private rooms = new Map<string, RoomState>();
+
+  // Indices for O(1) lookups
+  // socketId -> roomId
+  private socketToRoom = new Map<string, string>();
+  // producerId -> { roomId, socketId, userId, kind }
+  private producerIndex = new Map<string, { roomId: string; socketId: string; userId: string; kind: string }>();
+  // roomId -> Set of producerIds
+  private roomProducers = new Map<string, Set<string>>();
 
   // ── Room lifecycle ──────────────────────────────────────────────────────────
 
   async getOrCreateRoom(roomId: string, orgId: string): Promise<RoomState> {
     const existing = this.rooms.get(roomId);
     if (existing) return existing;
+
+    // If a broker already assigned this room to a worker, attempt to use it
+    try {
+      const assigned = await broker.getWorkerForRoom(roomId);
+      if (assigned) {
+        // Try to find a matching local worker by pid
+        const localWorker = getWorkerByPid(assigned);
+        if (localWorker) {
+          const router = await localWorker.createRouter({ mediaCodecs });
+          incrementWorkerLoad(localWorker.pid!);
+          const room: RoomState = {
+            id:          roomId,
+            orgId,
+            router,
+            workerPid:   localWorker.pid!,
+            peers:       new Map(),
+            isRecording: false,
+            createdAt:   new Date(),
+          };
+          this.rooms.set(roomId, room);
+          logger.info('Room created using broker-assigned worker', { roomId, workerPid: localWorker.pid });
+          return room;
+        }
+      }
+    } catch (e) {
+      logger.debug('Broker lookup failed or returned nothing', { roomId, error: String(e) });
+    }
 
     const worker = getLeastLoadedWorker();
     const router = await worker.createRouter({ mediaCodecs });
@@ -38,6 +75,8 @@ class RoomManager {
     };
 
     this.rooms.set(roomId, room);
+    // Persist mapping to broker
+    try { await broker.assignRoomToWorker(roomId, room.workerPid); } catch (e) { logger.warn('Failed to persist room->worker mapping', { roomId, error: String(e) }); }
     logger.info('Room created', { roomId, workerPid: worker.pid });
     return room;
   }
@@ -47,10 +86,9 @@ class RoomManager {
   }
 
   getRoomBySocketId(socketId: string): RoomState | undefined {
-    for (const room of this.rooms.values()) {
-      if (room.peers.has(socketId)) return room;
-    }
-    return undefined;
+    const roomId = this.socketToRoom.get(socketId);
+    if (!roomId) return undefined;
+    return this.rooms.get(roomId);
   }
 
   // ── Peer lifecycle ──────────────────────────────────────────────────────────
@@ -73,6 +111,7 @@ class RoomManager {
     };
 
     room.peers.set(socketId, peer);
+    this.socketToRoom.set(socketId, data.roomId);
     logger.debug('Peer added', { socketId, userId: data.userId, roomId: data.roomId });
     return peer;
   }
@@ -82,11 +121,9 @@ class RoomManager {
   }
 
   getPeerBySocketId(socketId: string): PeerState | undefined {
-    for (const room of this.rooms.values()) {
-      const peer = room.peers.get(socketId);
-      if (peer) return peer;
-    }
-    return undefined;
+    const roomId = this.socketToRoom.get(socketId);
+    if (!roomId) return undefined;
+    return this.rooms.get(roomId)?.peers.get(socketId);
   }
 
   getRoomPeers(roomId: string): PeerState[] {
@@ -100,18 +137,14 @@ class RoomManager {
   getAllProducersInRoom(roomId: string, excludeSocketId: string): ProducerInfo[] {
     const room = this.rooms.get(roomId);
     if (!room) return [];
-
+    const set = this.roomProducers.get(roomId);
+    if (!set) return [];
     const result: ProducerInfo[] = [];
-    for (const [sid, peer] of room.peers) {
-      if (sid === excludeSocketId) continue;
-      for (const [producerId, producer] of peer.producers) {
-        result.push({
-          producerId,
-          userId:   peer.userId,
-          kind:     producer.kind,
-          socketId: sid,
-        });
-      }
+    for (const producerId of set) {
+      const info = this.producerIndex.get(producerId);
+      if (!info) continue;
+      if (info.socketId === excludeSocketId) continue;
+      result.push({ producerId, userId: info.userId, kind: info.kind as any, socketId: info.socketId });
     }
     return result;
   }
@@ -148,6 +181,10 @@ class RoomManager {
     const peer = this.getPeer(socketId, roomId);
     if (!peer) throw new Error(`Peer ${socketId} not found`);
     peer.producers.set(producer.id, producer);
+    // update producer indices
+    this.producerIndex.set(producer.id, { roomId, socketId, userId: peer.userId, kind: producer.kind });
+    if (!this.roomProducers.has(roomId)) this.roomProducers.set(roomId, new Set());
+    this.roomProducers.get(roomId)!.add(producer.id);
   }
 
   getProducer(
@@ -179,35 +216,47 @@ class RoomManager {
   async removePeer(
     socketId: string
   ): Promise<{ roomId: string; userId: string; orgId: string } | null> {
-    for (const [roomId, room] of this.rooms) {
-      const peer = room.peers.get(socketId);
-      if (!peer) continue;
+    const roomId = this.socketToRoom.get(socketId);
+    if (!roomId) return null;
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const peer = room.peers.get(socketId);
+    if (!peer) return null;
 
-      // Close all mediasoup resources
-      for (const producer of peer.producers.values()) {
-        try { producer.close(); } catch { /* already closed */ }
-      }
-      for (const consumer of peer.consumers.values()) {
-        try { consumer.close(); } catch { /* already closed */ }
-      }
-      try { peer.sendTransport?.close(); } catch { /* ignore */ }
-      try { peer.recvTransport?.close(); } catch { /* ignore */ }
-
-      room.peers.delete(socketId);
-
-      logger.debug('Peer removed', { socketId, userId: peer.userId, roomId });
-
-      // Tear down empty rooms to free mediasoup resources
-      if (room.peers.size === 0) {
-        try { room.router.close(); } catch { /* ignore */ }
-        decrementWorkerLoad(room.workerPid);
-        this.rooms.delete(roomId);
-        logger.info('Room closed (empty)', { roomId });
-      }
-
-      return { roomId, userId: peer.userId, orgId: peer.orgId };
+    // Close all mediasoup resources
+    for (const producer of peer.producers.values()) {
+      try { producer.close(); } catch { /* already closed */ }
     }
-    return null;
+    for (const consumer of peer.consumers.values()) {
+      try { consumer.close(); } catch { /* already closed */ }
+    }
+    try { peer.sendTransport?.close(); } catch { /* ignore */ }
+    try { peer.recvTransport?.close(); } catch { /* ignore */ }
+
+    // Remove producer indices for this peer
+    for (const producer of peer.producers.values()) {
+      this.producerIndex.delete(producer.id);
+      const s = this.roomProducers.get(roomId);
+      if (s) s.delete(producer.id);
+    }
+
+    room.peers.delete(socketId);
+    this.socketToRoom.delete(socketId);
+
+    logger.debug('Peer removed', { socketId, userId: peer.userId, roomId });
+
+    // Tear down empty rooms to free mediasoup resources
+    if (room.peers.size === 0) {
+      try { room.router.close(); } catch { /* ignore */ }
+      decrementWorkerLoad(room.workerPid);
+      this.rooms.delete(roomId);
+      // cleanup indices
+      this.roomProducers.delete(roomId);
+      try { await broker.unassignRoom(roomId); } catch (e) { logger.debug('Failed to unassign room from broker', { roomId, error: String(e) }); }
+      logger.info('Room closed (empty)', { roomId });
+    }
+
+    return { roomId, userId: peer.userId, orgId: peer.orgId };
   }
 
   // ── Room recording state ────────────────────────────────────────────────────
@@ -278,6 +327,19 @@ class RoomManager {
       });
     }
     return stats;
+  }
+  // Testing helper: inject a pre-built room (used by unit tests)
+  addRoomForTests(room: RoomState): void {
+    this.rooms.set(room.id, room);
+    // populate roomProducers and socketToRoom
+    for (const [sid, peer] of room.peers) {
+      this.socketToRoom.set(sid, room.id);
+      for (const [pid, producer] of peer.producers) {
+        this.producerIndex.set(pid, { roomId: room.id, socketId: sid, userId: peer.userId, kind: producer.kind });
+        if (!this.roomProducers.has(room.id)) this.roomProducers.set(room.id, new Set());
+        this.roomProducers.get(room.id)!.add(pid);
+      }
+    }
   }
 }
 
