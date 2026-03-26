@@ -34,6 +34,37 @@ export function registerProducerHandlers(io: Server, socket: Socket): void {
 
         roomManager.addProducer(socket.id, socket.data.roomId, producer);
 
+        // If room is recording, create a server-side consumer to pipe this producer into the recording transport
+        try {
+          const room = roomManager.getRoom(socket.data.roomId);
+          if (room?.isRecording && (room.recordingTransport || room.recordingTransports)) {
+            // If a specific recording user is configured, only record their producers
+            if (room.recordingUserId && room.recordingUserId !== socket.data.userId) {
+              // Not the target user — skip creating a recording consumer
+            } else {
+              const recordingTransport = (producer.kind === 'audio')
+                ? (room.recordingTransports?.audio ?? room.recordingTransport)
+                : (room.recordingTransports?.video ?? room.recordingTransport);
+              const router = room.router;
+              if (router.canConsume({ producerId: producer.id, rtpCapabilities: router.rtpCapabilities })) {
+                try {
+                  // @ts-ignore - mediasoup typings allow transport.consume
+                  const recConsumer = await (recordingTransport as any).consume({
+                    producerId: producer.id,
+                    rtpCapabilities: router.rtpCapabilities,
+                    paused: false,
+                  });
+                  recConsumer.on('producerclose', () => { try { recConsumer.close(); } catch {} });
+                } catch (err) {
+                  logger.warn('Failed to create recording consumer for new producer', { producerId: producer.id, error: String(err) });
+                }
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn('Error while attempting to create recording consumer', { error: String(err) });
+        }
+
         // Forward quality score updates to the producing client
         producer.on('score', (score) => {
           socket.emit('producer-score', { producerId: producer.id, score });

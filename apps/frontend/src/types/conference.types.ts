@@ -64,6 +64,9 @@ export interface ConferenceState {
   localVideoLive:   boolean;
   isScreenSharing:  boolean;
   isHandRaised:     boolean;
+  isRecording:      boolean;
+  recordingProgress: number;
+  recordingUrl:     string | null;
   messages:         ChatMessage[];
   activePoll:       Poll | null;
   isConnected:      boolean;

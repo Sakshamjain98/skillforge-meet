@@ -217,9 +217,30 @@ class RoomManager {
     if (room) room.isRecording = recording;
   }
 
-  setRecordingTransport(roomId: string, transport: PlainTransport): void {
+  setRecordingTransport(
+    roomId: string,
+    transport: PlainTransport | { audio?: PlainTransport; video?: PlainTransport }
+  ): void {
     const room = this.rooms.get(roomId);
-    if (room) room.recordingTransport = transport;
+    if (!room) return;
+    // If caller passed an object with audio/video transports, store under recordingTransports
+    const maybe = transport as any;
+    if (maybe && (maybe.audio || maybe.video)) {
+      room.recordingTransports = {
+        audio: maybe.audio,
+        video: maybe.video,
+      };
+      // keep backwards compatibility by setting recordingTransport to audio transport when available
+      if (maybe.audio) room.recordingTransport = maybe.audio;
+    } else {
+      room.recordingTransport = transport as PlainTransport;
+    }
+  }
+
+  setRecordingTarget(roomId: string, userId?: string): void {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+    room.recordingUserId = userId;
   }
 
   // ── Snapshot for clients ────────────────────────────────────────────────────

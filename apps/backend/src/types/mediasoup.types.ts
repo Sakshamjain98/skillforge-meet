@@ -34,7 +34,13 @@ export interface RoomState {
   router:              Router;
   workerPid:           number;
   peers:               Map<string, PeerState>;
+  // Backwards-compatible single transport (older codepaths)
   recordingTransport?: PlainTransport;
+  // Prefer storing separate transports for audio/video to support distinct UDP ports
+  recordingTransports?: { audio?: PlainTransport; video?: PlainTransport };
+  // Which userId should be recorded (optional). When set, only producers
+  // owned by this user will be consumed into the recording transports.
+  recordingUserId?: string;
   isRecording:         boolean;
   createdAt:           Date;
 }

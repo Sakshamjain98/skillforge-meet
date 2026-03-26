@@ -3,6 +3,7 @@ import { roomManager } from '../room.manager';
 import { prisma } from '../../config/database';
 import { publish, ROUTING_KEYS } from '../../config/rabbitmq';
 import { logger } from '../../utils/logger';
+import { startRecording } from '../../services/recording.service';
 import type {
   JoinRoomPayload,
   JoinRoomResponse,
@@ -77,6 +78,21 @@ export function registerRoomHandlers(io: Server, socket: Socket): void {
             where: { id: roomId },
             data:  { status: 'LIVE', startedAt: new Date() },
           });
+
+          // Start recording automatically (best-effort)
+          try {
+            // Choose ephemeral ports for audio/video RTP
+            // Record only the session coach (creator) by default
+            try { roomManager.setRecordingTarget(roomId, session.coachId); } catch {}
+            // Let startRecording choose free UDP ports to avoid collisions
+            startRecording(roomId, 0, 0).then(() => {
+              try { roomManager.setRecording(roomId, true); } catch {}
+            }).catch((err) => {
+              logger.warn('Auto startRecording failed', { roomId, error: String(err) });
+            });
+          } catch (err) {
+            logger.warn('Auto-record start error', { error: String(err) });
+          }
         }
 
         // 9. Publish attendance event → RabbitMQ → attendance worker

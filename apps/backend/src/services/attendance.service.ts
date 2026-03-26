@@ -64,11 +64,24 @@ export async function recordLeave(event: LeaveEvent): Promise<void> {
 }
 
 export async function getSessionAttendance(sessionId: string) {
-  return prisma.sessionAttendance.findMany({
-    where:   { sessionId },
-    include: {
-      user: { select: { id: true, name: true, email: true, avatar: true } },
-    },
+  const rows = await prisma.sessionAttendance.findMany({
+    where: { sessionId },
+    include: { user: { select: { id: true, name: true, email: true, avatar: true } } },
     orderBy: { joinedAt: 'asc' },
   });
+
+  // Group by userId and build segments array per user
+  const map = new Map<string, { user: any; segments: Array<{ joinedAt: string; leftAt: string | null; durationSeconds?: number }> }>();
+
+  for (const r of rows) {
+    const u = r.user;
+    const seg = { joinedAt: r.joinedAt.toISOString(), leftAt: r.leftAt ? r.leftAt.toISOString() : null, durationSeconds: r.durationSeconds ?? undefined };
+    if (!map.has(r.userId)) {
+      map.set(r.userId, { user: u, segments: [seg] });
+    } else {
+      map.get(r.userId)!.segments.push(seg);
+    }
+  }
+
+  return Array.from(map.values());
 }

@@ -4,6 +4,10 @@ import { useRouter } from 'next/navigation';
 import { useConference } from '@/hooks/useConference';
 import { useConferenceStore } from '@/store/conference.store';
 import { useUIStore } from '@/store/ui.store';
+import { useAuthStore } from '@/store/auth.store';
+import { api } from '@/lib/api';
+import { getSocket } from '@/lib/socket';
+import { Modal } from '@/components/ui/Modal';
 import { VideoGrid } from './VideoGrid';
 import { ControlBar } from './ControlBar';
 import { ChatPanel }          from './ChatPanel';
@@ -21,6 +25,11 @@ export function ConferenceRoom({ roomId, sessionTitle }: ConferenceRoomProps) {
   const router = useRouter();
   const [isJoining, setIsJoining] = useState(false);
   const [showWaiting, setShowWaiting] = useState(true);
+  const [showAttendanceModal, setShowAttendanceModal] = useState(false);
+  const [attendance, setAttendance] = useState<any[]>([]);
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  const [ending, setEnding] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<'idle'|'started'|'done'|'failed'>('idle');
 
   // Zustand slices
   const isJoined      = useConferenceStore((s) => s.isJoined);
@@ -85,6 +94,33 @@ export function ConferenceRoom({ roomId, sessionTitle }: ConferenceRoomProps) {
     return () => window.removeEventListener('keydown', handler);
   }, [isJoined, toggleMic, toggleCamera, toggleHand]);
 
+  // ── Recording upload socket listeners ─────────────────────────────────────
+  useEffect(() => {
+    const socket = getSocket();
+    const onUploadStarted = ({ sessionId }: { sessionId: string }) => {
+      if (sessionId === roomId) setUploadStatus('started');
+    };
+    const onUploadDone = ({ sessionId, url }: { sessionId: string; url: string }) => {
+      if (sessionId === roomId) {
+        setUploadStatus('done');
+        setRecordingUrl((prev) => prev ?? url);
+      }
+    };
+    const onUploadFailed = ({ sessionId }: { sessionId: string }) => {
+      if (sessionId === roomId) setUploadStatus('failed');
+    };
+
+    socket.on('recording:upload:started', onUploadStarted);
+    socket.on('recording:upload:done', onUploadDone);
+    socket.on('recording:upload:failed', onUploadFailed);
+
+    return () => {
+      socket.off('recording:upload:started', onUploadStarted);
+      socket.off('recording:upload:done', onUploadDone);
+      socket.off('recording:upload:failed', onUploadFailed);
+    };
+  }, [roomId]);
+
   // ── Waiting room ───────────────────────────────────────────────────────────
   if (showWaiting) {
     return (
@@ -129,7 +165,43 @@ export function ConferenceRoom({ roomId, sessionTitle }: ConferenceRoomProps) {
           </span>
         </div>
 
-        {/* Room ID copy */}
+        <div className="flex items-center gap-2">
+          {/* End session (visible to hosts) */}
+          {(() => {
+            const user = useAuthStore.getState().user;
+            const canEnd = ['COACH', 'ORG_ADMIN', 'MANAGER'].includes(user?.role ?? '');
+            if (!canEnd) return null;
+            return (
+              <button
+                onClick={async () => {
+                  // Confirm
+                  // eslint-disable-next-line no-restricted-globals
+                  if (!confirm('End session for all participants and view attendance?')) return;
+                  setEnding(true);
+                  try {
+                    // Call end endpoint — it will stop recording, upload and return attendance + recordingUrl
+                    const { data } = await api.put(`/sessions/${roomId}/end`);
+                    setAttendance(data.attendance || []);
+                    setRecordingUrl(data.recordingUrl ?? null);
+                    setShowAttendanceModal(true);
+
+                    // Auto-redirect after showing the modal briefly
+                    setTimeout(() => router.push('/dashboard'), 6000);
+                  } catch (err) {
+                    toast.error('Failed to end session');
+                  } finally {
+                    setEnding(false);
+                  }
+                }}
+                className="mr-3 inline-flex items-center gap-2 px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm"
+              >
+                {ending ? 'Ending…' : 'End session'}
+              </button>
+            );
+          })()}
+
+          {/* Room ID copy */}
+        </div>
         <button
           onClick={() => {
             navigator.clipboard.writeText(roomId);
@@ -190,6 +262,52 @@ export function ConferenceRoom({ roomId, sessionTitle }: ConferenceRoomProps) {
         open={showDevices}
         onClose={uiActions.closeDeviceSelector}
       />
+
+      {/* Attendance modal shown after ending session */}
+      <Modal open={showAttendanceModal} onClose={() => setShowAttendanceModal(false)} title="Attendance">
+        <div className="space-y-3">
+                  {attendance.length === 0 ? (
+            <p className="text-sm text-gray-400">No attendance records found.</p>
+          ) : (
+            <div className="space-y-3 max-h-72 overflow-y-auto">
+              {attendance.map((entry) => (
+                <div key={entry.user.id} className="bg-gray-800 p-3 rounded-md">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <div className="text-sm text-white font-medium">{entry.user?.name ?? 'Unknown'}</div>
+                      <div className="text-xs text-gray-400">{entry.user?.email ?? ''}</div>
+                    </div>
+                    <div className="text-xs text-gray-400">{entry.segments.length} segment{entry.segments.length > 1 ? 's' : ''}</div>
+                  </div>
+                  <ul className="space-y-1">
+                    {entry.segments.map((s: any, idx: number) => (
+                      <li key={idx} className="flex items-center justify-between text-xs text-gray-300">
+                        <div>{new Date(s.joinedAt).toLocaleString()}</div>
+                        <div className="text-gray-400">{s.leftAt ? `${Math.floor((new Date(s.leftAt).getTime() - new Date(s.joinedAt).getTime())/1000)}s` : '—'}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Recording upload status */}
+          <div className="pt-3 border-t border-gray-800">
+            {ending ? (
+              <div className="flex items-center gap-2 text-sm text-gray-300">
+                <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                Stopping recording and uploading…
+              </div>
+            ) : recordingUrl ? (
+              <div className="text-sm text-indigo-300">
+                Recording uploaded — <a href={recordingUrl} target="_blank" rel="noreferrer" className="underline">view</a>
+              </div>
+            ) : (
+              <div className="text-sm text-gray-400">No recording available or upload failed.</div>
+            )}
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

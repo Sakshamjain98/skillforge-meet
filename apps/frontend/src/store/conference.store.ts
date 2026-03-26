@@ -22,6 +22,9 @@ interface ConferenceStore extends ConferenceState {
   setCameraOn:     (on: boolean) => void;
   setScreenSharing:(sharing: boolean) => void;
   setHandRaised:   (raised: boolean) => void;
+  setRecording:     (isRecording: boolean) => void;
+  setRecordingProgress: (progress: number) => void;
+  setRecordingUrl:   (url: string | null) => void;
 
   // Chat
   addMessage:      (msg: ChatMessage) => void;

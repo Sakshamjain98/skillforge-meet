@@ -12,6 +12,8 @@ import { registerChatHandlers } from './handlers/chat.handler';
 import { registerControlHandlers } from './handlers/control.handler';
 import { logger } from '../utils/logger';
 
+let ioInstance: Server | null = null;
+
 export function createSocketServer(httpServer: HttpServer): Server {
   const io = new Server(httpServer, {
     // Allow cross-origin from the Next.js dev server
@@ -79,5 +81,10 @@ export function createSocketServer(httpServer: HttpServer): Server {
   });
 
   logger.info('Socket.IO server initialised');
+  ioInstance = io;
   return io;
+}
+
+export function getIo(): Server | null {
+  return ioInstance;
 }

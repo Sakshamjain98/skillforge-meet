@@ -6,6 +6,8 @@ import {
   getSessionById,
   markSessionEnded,
 } from '../services/session.service';
+import { stopRecording, isRecording } from '../services/recording.service';
+import { roomManager } from '../socket/room.manager';
 import { getSessionAttendance } from '../services/attendance.service';
 
 // ── Validation schemas ────────────────────────────────────────────────────────
@@ -133,8 +135,39 @@ export async function endSessionHandler(
   next: NextFunction
 ): Promise<void> {
   try {
+    // Fetch session to obtain orgId (used for recording upload)
+    const sessionBefore = await getSessionById(req.params.id);
+    if (!sessionBefore) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    // If a recording was active, we must ensure upload succeeded before ending the session
+    let recordingUrl: string | null = null;
+    const hadRecording = isRecording(req.params.id);
+    if (hadRecording) {
+      try {
+        recordingUrl = await stopRecording(req.params.id, sessionBefore.orgId);
+      } catch (err: any) {
+        // Upload failed — do NOT mark session ended. Return an error to the client so they can retry.
+        const message = err?.message ?? String(err);
+        // eslint-disable-next-line no-console
+        console.error('Recording upload failed, session will remain live', message);
+        res.status(500).json({ error: 'Recording upload failed, session not ended', detail: message });
+        return;
+      }
+    } else {
+      // No active recording — nothing to stop
+    }
+
+    // Clear room recording flag (in-memory)
+    try { roomManager.setRecording(req.params.id, false); } catch { /* ignore */ }
+
     const session = await markSessionEnded(req.params.id);
-    res.json({ session });
+    // Fetch aggregated attendance to return to client
+    const attendance = await getSessionAttendance(req.params.id);
+
+    res.json({ session, attendance, recordingUrl });
   } catch (err) {
     next(err);
   }
