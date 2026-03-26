@@ -1,5 +1,6 @@
 import { Server as HttpServer } from 'http';
 import { Server } from 'socket.io';
+import { instrument } from '@socket.io/admin-ui';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { redisPub, redisSub } from '../config/redis';
 import { socketAuthMiddleware } from './auth.middleware';
@@ -32,6 +33,14 @@ export function createSocketServer(httpServer: HttpServer): Server {
   // With this adapter, io.to(roomId).emit() broadcasts across ALL server
   // instances, not just the one that received the socket connection.
   io.adapter(createAdapter(redisPub, redisSub));
+
+  // ── Optional Admin UI for Socket.IO (disabled auth in dev)
+  try {
+    instrument(io, { auth: false });
+    logger.info('Socket.IO admin-ui instrumented');
+  } catch (err) {
+    logger.warn('Socket.IO admin-ui instrument failed', { error: String(err) });
+  }
 
   // ── Auth middleware — runs before every connection ───────────────────────
   io.use(socketAuthMiddleware);

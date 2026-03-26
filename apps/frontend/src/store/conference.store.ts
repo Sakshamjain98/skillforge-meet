@@ -17,6 +17,7 @@ interface ConferenceStore extends ConferenceState {
 
   // Local media
   setLocalStream:  (stream: MediaStream | null) => void;
+  setLocalVideoLive: (live: boolean) => void;
   setMicOn:        (on: boolean) => void;
   setCameraOn:     (on: boolean) => void;
   setScreenSharing:(sharing: boolean) => void;
@@ -40,6 +41,7 @@ const INITIAL_STATE: ConferenceState = {
   localStream:     null,
   isMicOn:         true,
   isCameraOn:      true,
+  localVideoLive:  false,
   isScreenSharing: false,
   isHandRaised:    false,
   messages:        [],
@@ -96,6 +98,7 @@ export const useConferenceStore = create<ConferenceStore>((set) => ({
     }),
 
   setLocalStream:   (localStream)     => set({ localStream }),
+  setLocalVideoLive: (localVideoLive) => set({ localVideoLive }),
   setMicOn:         (isMicOn)         => set({ isMicOn }),
   setCameraOn:      (isCameraOn)      => set({ isCameraOn }),
   setScreenSharing: (isScreenSharing) => set({ isScreenSharing }),

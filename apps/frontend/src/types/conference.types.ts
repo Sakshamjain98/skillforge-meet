@@ -10,6 +10,9 @@ export interface Peer {
   isCameraOff:  boolean;
   videoStream?: MediaStream;
   audioStream?: MediaStream;
+  // Optional consumer IDs for remote media so clients can request resume/reconnect
+  videoConsumerId?: string;
+  audioConsumerId?: string;
 }
 
 // ── Chat ─────────────────────────────────────────────────────────────────────
@@ -58,6 +61,7 @@ export interface ConferenceState {
   localStream:      MediaStream | null;   // camera / screen-share video + audio
   isMicOn:          boolean;
   isCameraOn:       boolean;
+  localVideoLive:   boolean;
   isScreenSharing:  boolean;
   isHandRaised:     boolean;
   messages:         ChatMessage[];

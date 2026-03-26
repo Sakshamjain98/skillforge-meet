@@ -217,9 +217,9 @@ export default function DashboardPage() {
             </div>
             <div>
               <span className="text-white font-semibold">SkillForge Meet</span>
-              {user?.name && (
-                <span className="ml-2 text-gray-500 text-sm">· {user.name}</span>
-              )}
+              <span className="ml-2 text-gray-500 text-sm" aria-hidden={!user?.name}>
+                {user?.name ? `· ${user.name}` : ''}
+              </span>
             </div>
           </div>
           <button
@@ -238,12 +238,15 @@ export default function DashboardPage() {
         {/* Page title + create button */}
         <div className="flex items-center justify-between">
           <h2 className="text-white text-2xl font-bold">Sessions</h2>
-          {canCreateSession && (
-            <Button onClick={() => setShowCreate(true)} size="md">
-              <Plus size={16} />
-              New session
-            </Button>
-          )}
+          <Button
+            onClick={() => setShowCreate(true)}
+            size="md"
+            disabled={!canCreateSession}
+            className={!canCreateSession ? 'opacity-0 pointer-events-none' : ''}
+          >
+            <Plus size={16} />
+            New session
+          </Button>
         </div>
 
         {loading ? (

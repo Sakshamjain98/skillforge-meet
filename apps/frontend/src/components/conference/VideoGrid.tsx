@@ -22,6 +22,7 @@ export function VideoGrid() {
   const isCameraOn     = useConferenceStore((s) => s.isCameraOn);
   const isHandRaised   = useConferenceStore((s) => s.isHandRaised);
   const isScreenSharing = useConferenceStore((s) => s.isScreenSharing);
+  const localVideoLive  = useConferenceStore((s) => s.localVideoLive);
   const peers          = useConferenceStore((s) => Array.from(s.peers.values()));
 
   const totalCount = peers.length + 1; // +1 for local user
@@ -42,6 +43,7 @@ export function VideoGrid() {
       <VideoTile
         isLocal
         stream={localStream ?? undefined}
+        localVideoLive={localVideoLive}
         name={user?.name ?? 'You'}
         isMuted={!isMicOn}
         isCameraOff={!isCameraOn}
@@ -56,6 +58,8 @@ export function VideoGrid() {
           key={peer.userId}
           stream={peer.videoStream}
           audioStream={peer.audioStream}
+          videoConsumerId={peer.videoConsumerId}
+          audioConsumerId={peer.audioConsumerId}
           name={peer.name}
           isMuted={peer.isMuted}
           isCameraOff={peer.isCameraOff}

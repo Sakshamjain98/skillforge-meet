@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
+    "@socket.io/admin-ui": "^0.5.1",
     "@socket.io/redis-adapter": "^8.3.0",
     "amqplib": "^0.10.4",
     "bcryptjs": "^2.4.3",

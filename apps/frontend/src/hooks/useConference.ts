@@ -131,6 +131,13 @@ export function useConference(roomId: string) {
         const consumer = await recvTransport.consume(params);
         consumersRef.current.set(consumer.id, consumer);
 
+        // Save consumer id on the peer for later manual resume/reconnect
+        if (kind === 'video') {
+          store.updatePeer(userId, { videoConsumerId: consumer.id });
+        } else {
+          store.updatePeer(userId, { audioConsumerId: consumer.id });
+        }
+
         const stream = new MediaStream([consumer.track]);
 
         if (kind === 'video') {
@@ -144,6 +151,24 @@ export function useConference(roomId: string) {
 
         consumer.on('trackended', () => {
           store.updatePeer(userId, kind === 'video' ? { videoStream: undefined } : { audioStream: undefined });
+        });
+
+        (consumer as any).on('producerpause', () => {
+          // server will mirror this event as consumer-paused; keep peer flags in sync
+          // we don't change peer stream here, UI will show paused state via peer.isMuted/isCameraOff
+        });
+
+        (consumer as any).on('producerresume', () => {
+          // mirrored by server as consumer-resumed
+        });
+
+        (consumer as any).on('producerclose', () => {
+          // When the producer is closed the server will notify via consumer-closed
+          // but ensure local cleanup as well
+          try { consumer.close(); } catch { /* ignore */ }
+          consumersRef.current.delete(consumer.id);
+          if (kind === 'video') store.updatePeer(userId, { videoConsumerId: undefined, videoStream: undefined });
+          else store.updatePeer(userId, { audioConsumerId: undefined, audioStream: undefined });
         });
 
         consumer.on('transportclose', () => {
@@ -182,21 +207,39 @@ export function useConference(roomId: string) {
 
     // 3. Get local media (gracefully degrade to audio-only)
     let localStream: MediaStream | null = null;
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
-    } catch {
+    // Prefer an existing preview stream from the store (set by WaitingRoom)
+    if (store.localStream) {
+      localStream = store.localStream;
+      console.debug('[useConference] reusing localStream from store', { id: localStream.id });
+    } else {
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        store.setCameraOn(false);
-        toast('Camera unavailable — joining audio only', { icon: '🎙️' });
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
       } catch {
-        toast.error('Cannot access microphone. Joining without media.');
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          store.setCameraOn(false);
+          toast('Camera unavailable — joining audio only', { icon: '🎙️' });
+        } catch {
+          toast.error('Cannot access microphone. Joining without media.');
+        }
+      }
+      if (localStream) {
+        store.setLocalStream(localStream);
+        // Mark local video live if a video track exists and is not ended
+        const vTrack = localStream.getVideoTracks()[0];
+        store.setLocalVideoLive(!!vTrack && vTrack.readyState !== 'ended');
+        if (vTrack) {
+          vTrack.addEventListener('ended', () => {
+            console.debug('[useConference] local video track ended');
+            store.setLocalVideoLive(false);
+          }, { once: true });
+        }
+        console.debug('[useConference] initial localStream set', { id: localStream.id, tracks: localStream.getTracks().map(t => ({ kind: t.kind, enabled: t.enabled })) });
       }
     }
-    if (localStream) store.setLocalStream(localStream);
 
     // 4. Join room → receive router capabilities + existing producers
     const joinData = await emitWithPromise<{
@@ -238,6 +281,15 @@ export function useConference(roomId: string) {
           track:     audioTrack,
           codecOptions: { opusStereo: true, opusDtx: true },
         });
+        console.debug('[useConference] audio producer created', { id: audioProducerRef.current?.id });
+        // Log producer state changes for diagnostics
+        try {
+          const p = audioProducerRef.current as any;
+          p.on('pause', () => console.debug('[producer] audio paused', { id: p.id }));
+          p.on('resume', () => console.debug('[producer] audio resumed', { id: p.id }));
+          p.on('close', () => console.debug('[producer] audio closed', { id: p.id }));
+          p.on('transportclose', () => console.debug('[producer] audio transport closed', { id: p.id }));
+        } catch (e) { console.debug('[useConference] attach audio producer listeners failed', e); }
       }
 
       const videoTrack = localStream.getVideoTracks()[0];
@@ -251,6 +303,16 @@ export function useConference(roomId: string) {
           ],
           codecOptions: { videoGoogleStartBitrate: 1000 },
         });
+        console.debug('[useConference] video producer created', { id: videoProducerRef.current?.id });
+        try {
+          const p = videoProducerRef.current as any;
+          p.on('pause', () => { console.debug('[producer] video paused', { id: p.id }); store.setLocalVideoLive(false); });
+          p.on('resume', () => { console.debug('[producer] video resumed', { id: p.id }); store.setLocalVideoLive(true); });
+          p.on('close', () => { console.debug('[producer] video closed', { id: p.id }); store.setLocalVideoLive(false); });
+          p.on('transportclose', () => { console.debug('[producer] video transport closed', { id: p.id }); store.setLocalVideoLive(false); });
+        } catch (e) { console.debug('[useConference] attach video producer listeners failed', e); }
+        // Mark video as live for UI
+        store.setLocalVideoLive(true);
       }
     }
 
@@ -336,6 +398,35 @@ export function useConference(roomId: string) {
       store.updatePeer(userId, { isMuted, isCameraOff });
     };
 
+    const onProducerPaused = ({ producerId, userId }: { producerId: string; userId: string }) => {
+      // mark peer camera as off so UI can show paused state
+      const peer = useConferenceStore.getState().peers.get(userId);
+      if (peer) store.updatePeer(userId, { isCameraOff: true });
+      console.debug('[socket] producer-paused received', { producerId, userId });
+    };
+
+    const onProducerResumed = async ({ producerId, userId }: { producerId: string; userId: string }) => {
+      console.debug('[socket] producer-resumed received', { producerId, userId });
+      // Find any local consumer that consumes this producer and resume it
+      try {
+        const socket = getSocket();
+        for (const consumer of consumersRef.current.values()) {
+          try {
+            if ((consumer as any).producerId === producerId) {
+              // Tell server to resume this consumer, then attempt local play
+              await emitWithPromise(socket, 'resume-consumer', { consumerId: consumer.id });
+              // If we have a stored peer mapping, clear camera-off flag
+              if (userId) store.updatePeer(userId, { isCameraOff: false });
+            }
+          } catch (e) {
+            console.debug('[onProducerResumed] resume-consumer failed', e);
+          }
+        }
+      } catch (err) {
+        console.debug('[onProducerResumed] handler failed', err);
+      }
+    };
+
     const onForceMute = ({ targetUserId }: { targetUserId: string }) => {
       if (targetUserId === user?.id) {
         toggleMic();
@@ -377,9 +468,44 @@ export function useConference(roomId: string) {
       console.debug('[socket] consumer-closed', { consumerId });
     };
 
+    const onConsumerResumed = ({ consumerId }: { consumerId: string }) => {
+      console.debug('[socket] consumer-resumed', { consumerId });
+      const consumer = consumersRef.current.get(consumerId);
+      if (!consumer) return;
+      try {
+        // Build a fresh MediaStream from the resumed track and update the peer entry
+        const stream = new MediaStream([consumer.track]);
+        // Find peer that owns this consumer id
+        for (const [userId, p] of useConferenceStore.getState().peers) {
+          if ((p as any).videoConsumerId === consumerId) {
+            store.setPeerVideoStream(userId, stream);
+            store.updatePeer(userId, { isCameraOff: false });
+            break;
+          }
+        }
+      } catch (e) {
+        console.debug('[onConsumerResumed] failed', e);
+      }
+    };
+
+    const onConsumerPaused = ({ consumerId }: { consumerId: string }) => {
+      console.debug('[socket] consumer-paused', { consumerId });
+      // mark peer camera off flag for UI
+      for (const [userId, p] of useConferenceStore.getState().peers) {
+        if ((p as any).videoConsumerId === consumerId) {
+          store.updatePeer(userId, { isCameraOff: true });
+          break;
+        }
+      }
+    };
+
     socket.on('peer-joined',        onPeerJoined);
     socket.on('peer-left',          onPeerLeft);
     socket.on('new-producer',       onNewProducer);
+    socket.on('producer-paused',    onProducerPaused);
+    socket.on('producer-resumed',   onProducerResumed);
+    socket.on('consumer-resumed',   onConsumerResumed);
+    socket.on('consumer-paused',    onConsumerPaused);
     socket.on('new-message',        onNewMessage);
     socket.on('hand-raised',        onHandRaised);
     socket.on('peer-state-changed', onPeerStateChanged);
@@ -394,6 +520,10 @@ export function useConference(roomId: string) {
       socket.off('peer-joined',        onPeerJoined);
       socket.off('peer-left',          onPeerLeft);
       socket.off('new-producer',       onNewProducer);
+      socket.off('producer-paused',    onProducerPaused);
+      socket.off('producer-resumed',   onProducerResumed);
+      socket.off('consumer-resumed',   onConsumerResumed);
+      socket.off('consumer-paused',    onConsumerPaused);
       socket.off('new-message',        onNewMessage);
       socket.off('hand-raised',        onHandRaised);
       socket.off('peer-state-changed', onPeerStateChanged);
@@ -409,37 +539,221 @@ export function useConference(roomId: string) {
   // ── Controls ─────────────────────────────────────────────────────────────
 
   const toggleMic = useCallback(async () => {
-    const producer = audioProducerRef.current;
-    const socket   = getSocket();
-    if (!producer) return;
+    let producer = audioProducerRef.current;
+    const socket = getSocket();
 
     const nowOn = store.isMicOn;
+    // TURN mic off
     if (nowOn) {
-      await producer.pause();
-      socket.emit('pause-producer', { producerId: producer.id }, () => {});
-    } else {
-      await producer.resume();
-      socket.emit('resume-producer', { producerId: producer.id }, () => {});
+      if (producer) {
+        try { await producer.pause(); } catch {}
+        socket.emit('pause-producer', { producerId: producer.id }, () => {});
+      }
+      store.setMicOn(false);
+      socket.emit('update-peer-state', { isMuted: true });
+      return;
     }
-    store.setMicOn(!nowOn);
-    socket.emit('update-peer-state', { isMuted: nowOn });
+
+    // TURN mic on
+    if (producer) {
+      try { await producer.resume(); } catch {}
+      socket.emit('resume-producer', { producerId: producer.id }, () => {});
+      store.setMicOn(true);
+      socket.emit('update-peer-state', { isMuted: false });
+      return;
+    }
+
+    // No existing producer — create one
+    try {
+      let localStream = store.localStream;
+      if (!localStream) {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        store.setLocalStream(localStream);
+      }
+
+      const audioTrack = localStream.getAudioTracks()[0];
+      const sendTransport = sendTransportRef.current;
+      if (!audioTrack || !sendTransport) throw new Error('No audio track or send transport');
+
+      producer = await sendTransport.produce({ track: audioTrack, codecOptions: { opusStereo: true, opusDtx: true } });
+      audioProducerRef.current = producer;
+      try {
+        const p = audioProducerRef.current as any;
+        p.on('pause', () => console.debug('[producer] audio paused', { id: p.id }));
+        p.on('resume', () => console.debug('[producer] audio resumed', { id: p.id }));
+        p.on('close', () => console.debug('[producer] audio closed', { id: p.id }));
+        p.on('transportclose', () => console.debug('[producer] audio transport closed', { id: p.id }));
+      } catch (e) { console.debug('[toggleMic] attach audio producer listeners failed', e); }
+
+      store.setMicOn(true);
+      socket.emit('update-peer-state', { isMuted: false });
+    } catch (err) {
+      console.error('[toggleMic] create producer failed', err);
+      toast.error('Could not enable microphone');
+    }
   }, [store.isMicOn]);
 
   const toggleCamera = useCallback(async () => {
-    const producer = videoProducerRef.current;
-    const socket   = getSocket();
-    if (!producer) return;
+    let producer = videoProducerRef.current;
+    const socket = getSocket();
 
     const nowOn = store.isCameraOn;
+    // TURN camera off
     if (nowOn) {
-      await producer.pause();
-      socket.emit('pause-producer', { producerId: producer.id }, () => {});
-    } else {
-      await producer.resume();
-      socket.emit('resume-producer', { producerId: producer.id }, () => {});
+      if (producer) {
+        try { await producer.pause(); } catch {}
+        socket.emit('pause-producer', { producerId: producer.id }, () => {});
+      }
+      store.setCameraOn(false);
+      // mark local video not live
+      store.setLocalVideoLive(false);
+      socket.emit('update-peer-state', { isCameraOff: true });
+      return;
     }
-    store.setCameraOn(!nowOn);
-    socket.emit('update-peer-state', { isCameraOff: nowOn });
+
+    // TURN camera on
+    if (producer) {
+      // If producer exists, prefer replacing its track (handles paused/ended cases)
+      try {
+        // Try to get a fresh camera track
+        const camStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
+        const camTrack = camStream.getVideoTracks()[0];
+        if (!camTrack) throw new Error('No camera track');
+
+        // Replace track on existing producer (safer than creating new producer)
+        try {
+          await producer.replaceTrack({ track: camTrack });
+          // After replacing, ensure producer is resumed so the track is enabled
+          try { await producer.resume(); } catch (e) { console.debug('[toggleCamera] resume after replace failed', e); }
+          socket.emit('resume-producer', { producerId: producer.id }, () => {});
+        } catch (replaceErr) {
+          console.debug('[toggleCamera] replaceTrack failed, attempting resume', replaceErr);
+          try { await producer.resume(); } catch {}
+          socket.emit('resume-producer', { producerId: producer.id }, () => {});
+        }
+
+        // Update local preview stream: keep audio tracks, swap video
+        const existing = store.localStream;
+        const merged = new MediaStream();
+        if (existing) {
+          for (const t of existing.getAudioTracks()) merged.addTrack(t);
+          existing.getVideoTracks().forEach((t) => t.stop());
+        }
+        merged.addTrack(camTrack);
+        store.setLocalStream(merged);
+        store.setCameraOn(true);
+        store.setLocalVideoLive(true);
+        socket.emit('update-peer-state', { isCameraOff: false });
+          // Defensive: sometimes the obtained track may be ended immediately in some browsers.
+          // Verify track readiness shortly after attaching and retry once if necessary.
+          await new Promise((res) => setTimeout(res, 300));
+          try {
+            const vt = store.localStream?.getVideoTracks()[0];
+            if (!vt || vt.readyState === 'ended') {
+              console.debug('[toggleCamera] video track ended after attach, retrying getUserMedia');
+              const retryStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
+              const retryTrack = retryStream.getVideoTracks()[0];
+              if (videoProducerRef.current && retryTrack) {
+                try {
+                  await videoProducerRef.current.replaceTrack({ track: retryTrack });
+                  try { await videoProducerRef.current.resume(); } catch (e) { console.debug('[toggleCamera] resume after retry replace failed', e); }
+                  socket.emit('resume-producer', { producerId: videoProducerRef.current.id }, () => {});
+                  // update preview
+                  const keep = new MediaStream();
+                  const ex = store.localStream;
+                  if (ex) for (const t of ex.getAudioTracks()) keep.addTrack(t);
+                  keep.addTrack(retryTrack);
+                  store.setLocalStream(keep);
+                  console.debug('[toggleCamera] successfully replaced ended track');
+                } catch (err) {
+                  console.debug('[toggleCamera] retry replaceTrack failed', err);
+                }
+              }
+            }
+          } catch (err) {
+            console.debug('[toggleCamera] readiness check failed', err);
+          }
+        return;
+      } catch (err) {
+        console.error('[toggleCamera] replace existing producer failed', err);
+        // fallthrough to create a new producer below
+      }
+    }
+
+    // No existing producer — create one and update local preview
+    try {
+      const sendTransport = sendTransportRef.current;
+      if (!sendTransport) throw new Error('No send transport');
+
+      // Acquire camera stream (video only)
+      const camStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
+      const camTrack = camStream.getVideoTracks()[0];
+      if (!camTrack) throw new Error('No camera track');
+
+      // Produce video
+      producer = await sendTransport.produce({
+        track: camTrack,
+        encodings: [
+          { rid: 'r0', maxBitrate: 100_000, scalabilityMode: 'S1T3' },
+          { rid: 'r1', maxBitrate: 500_000, scalabilityMode: 'S1T3' },
+          { rid: 'r2', maxBitrate: 1_500_000, scalabilityMode: 'S1T3' },
+        ],
+        codecOptions: { videoGoogleStartBitrate: 1000 },
+      });
+      videoProducerRef.current = producer;
+      try {
+        const p = videoProducerRef.current as any;
+        p.on('pause', () => console.debug('[producer] video paused', { id: p.id }));
+        p.on('resume', () => console.debug('[producer] video resumed', { id: p.id }));
+        p.on('close', () => console.debug('[producer] video closed', { id: p.id }));
+        p.on('transportclose', () => console.debug('[producer] video transport closed', { id: p.id }));
+      } catch (e) { console.debug('[toggleCamera] attach video producer listeners failed', e); }
+      // Ensure new producer is resumed/active
+      try { await videoProducerRef.current.resume(); } catch (e) { console.debug('[toggleCamera] resume new producer failed', e); }
+      socket.emit('resume-producer', { producerId: videoProducerRef.current.id }, () => {});
+
+      // Merge existing audio (if any) with new video for local preview
+      const existing = store.localStream;
+      const merged = new MediaStream();
+      if (existing) {
+        for (const t of existing.getAudioTracks()) merged.addTrack(t);
+        // stop any old video tracks
+        existing.getVideoTracks().forEach((t) => t.stop());
+      }
+      merged.addTrack(camTrack);
+      store.setLocalStream(merged);
+      store.setCameraOn(true);
+      store.setLocalVideoLive(true);
+      socket.emit('update-peer-state', { isCameraOff: false });
+      // Defensive readiness check same as above for newly created producer
+      await new Promise((res) => setTimeout(res, 300));
+      try {
+        const vt = store.localStream?.getVideoTracks()[0];
+        if (!vt || vt.readyState === 'ended') {
+          console.debug('[toggleCamera] (create) video track ended after attach, retrying getUserMedia');
+          const retryStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
+          const retryTrack = retryStream.getVideoTracks()[0];
+          if (videoProducerRef.current && retryTrack) {
+            try {
+              await videoProducerRef.current.replaceTrack({ track: retryTrack });
+              const keep = new MediaStream();
+              const ex = store.localStream;
+              if (ex) for (const t of ex.getAudioTracks()) keep.addTrack(t);
+              keep.addTrack(retryTrack);
+              store.setLocalStream(keep);
+              console.debug('[toggleCamera] (create) successfully replaced ended track');
+            } catch (err) {
+              console.debug('[toggleCamera] (create) retry replaceTrack failed', err);
+            }
+          }
+        }
+      } catch (err) {
+        console.debug('[toggleCamera] (create) readiness check failed', err);
+      }
+    } catch (err) {
+      console.error('[toggleCamera] create producer failed', err);
+      toast.error('Could not enable camera');
+    }
   }, [store.isCameraOn]);
 
   const startScreenShare = useCallback(async () => {
@@ -456,6 +770,7 @@ export function useConference(roomId: string) {
 
       store.setLocalStream(screenStream);
       store.setScreenSharing(true);
+      store.setLocalVideoLive(true);
 
       screenTrack.addEventListener('ended', () => {
         stopScreenShare();
@@ -478,6 +793,7 @@ export function useConference(roomId: string) {
       store.localStream?.getTracks().forEach((t) => t.stop());
       store.setLocalStream(camStream);
       store.setScreenSharing(false);
+      store.setLocalVideoLive(true);
     } catch {
       toast.error('Could not restore camera');
     }
